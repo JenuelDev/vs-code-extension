@@ -13,11 +13,8 @@ type ParsedRouteLine = {
     name: string | null;
 };
 
-const toSlashPath = (input: string) => input.replace(/\\/g, "/");
-
-const normalizePath = (input: string) => {
-    return toSlashPath(input).replace(/^\.\//, "").replace(/^\/+/, "");
-};
+const normalizePath = (input: string) =>
+    input.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
 
 const pathMatches = (routeFile: string, documentPath: string) => {
     if (routeFile === documentPath) {
@@ -40,17 +37,8 @@ const normalizeUri = (input: string) => {
     return cleaned.replace(/^\/+/, "").replace(/\/+$/, "");
 };
 
-const parseMethodsFromMatch = (source: string): string[] => {
-    const methods: string[] = [];
-    const methodRegex = /['\"]([A-Za-z]+)['\"]/g;
-    let match: RegExpExecArray | null = null;
-
-    while ((match = methodRegex.exec(source)) !== null) {
-        methods.push(match[1].toUpperCase());
-    }
-
-    return Array.from(new Set(methods));
-};
+const parseMethodsFromMatch = (source: string): string[] =>
+    Array.from(new Set(Array.from(source.matchAll(/['"]([A-Za-z]+)['"]/g), (m) => m[1].toUpperCase())));
 
 const parseRouteLine = (line: string): ParsedRouteLine | null => {
     const routeNameMatch = /->\s*name\s*\(\s*(['"])([^'"]+)\1\s*\)/i.exec(line);
@@ -187,25 +175,10 @@ const scoreRouteMatch = (
     return score;
 };
 
-const resolvePath = (routeUri: string) => {
-    if (!routeUri || routeUri === "/") {
-        return "/";
-    }
+const resolvePath = (routeUri: string) => (routeUri && routeUri !== "/") ? (routeUri.startsWith("/") ? routeUri : `/${routeUri}`) : "/";
 
-    return routeUri.startsWith("/") ? routeUri : `/${routeUri}`;
-};
-
-const formatHintPath = (path: string, parsed: ParsedRouteLine) => {
-    if (
-        normalizeUri(parsed.uri) === "/" &&
-        path !== "/" &&
-        !path.endsWith("/")
-    ) {
-        return `${path}/`;
-    }
-
-    return path;
-};
+const formatHintPath = (path: string, parsed: ParsedRouteLine) =>
+    normalizeUri(parsed.uri) === "/" && path !== "/" && !path.endsWith("/") ? `${path}/` : path;
 
 export class RoutePathInlayHintsProvider implements vscode.InlayHintsProvider {
     provideInlayHints(
