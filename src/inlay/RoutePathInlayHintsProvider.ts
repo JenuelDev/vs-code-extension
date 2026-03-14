@@ -3,7 +3,11 @@ import { config } from "@src/support/config";
 import { relativePath } from "@src/support/project";
 import * as vscode from "vscode";
 
+// Command used by the inlay hint tooltip to copy the resolved route path
 export const copyRoutePathCommand = "laravel.route.copyPath";
+
+// Match files that represent Laravel route definitions.
+// Examples: `routes/web.php`, `Routes/api.php`, or `modules/foo/routes/custom.php`.
 
 const ROUTE_FILE_REGEX = /(^|[\\/])[Rr]outes?(?:[\\/].+)?\.php$/;
 
@@ -13,9 +17,19 @@ type ParsedRouteLine = {
     name: string | null;
 };
 
+// ParsedRouteLine represents the essential data extracted from a single
+// route declaration line in a PHP routes file. Keeping this minimal
+// reduces work done per-line and focuses the matching logic on only
+// the fields that matter for inlay hint resolution.
+
+// Normalize filesystem paths to a project-relative style used for
+// comparing discovered route file names with the current document.
 const normalizePath = (input: string) =>
     input.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
 
+// Returns true when a discovered route file should be considered the
+// same as (or closely related to) the file being edited. This lets the
+// provider prefer routes declared in the same file as the hint.
 const pathMatches = (routeFile: string, documentPath: string) => {
     if (routeFile === documentPath) {
         return true;
@@ -27,6 +41,10 @@ const pathMatches = (routeFile: string, documentPath: string) => {
     );
 };
 
+// Normalize a declared URI for matching purposes.
+// - keep single-root `/` as `/`
+// - otherwise strip leading/trailing slashes so comparisons like
+//   `users` vs `/users/` are consistent
 const normalizeUri = (input: string) => {
     const cleaned = input.trim();
 
@@ -37,9 +55,15 @@ const normalizeUri = (input: string) => {
     return cleaned.replace(/^\/+/, "").replace(/\/+$/, "");
 };
 
+// Extract unique HTTP methods from a `match([..], ...)` declaration
+// such as `['get','post']` and return them uppercased.
 const parseMethodsFromMatch = (source: string): string[] =>
     Array.from(new Set(Array.from(source.matchAll(/['"]([A-Za-z]+)['"]/g), (m) => m[1].toUpperCase())));
 
+// Parse a single source line and return the parsed route components
+// when the line contains a recognizable `Route::...` declaration.
+// The function is intentionally conservative so it won't try to fully
+// parse PHP — it only extracts the common, one-line forms used in tests.
 const parseRouteLine = (line: string): ParsedRouteLine | null => {
     const routeNameMatch = /->\s*name\s*\(\s*(['"])([^'"]+)\1\s*\)/i.exec(line);
     const routeName = routeNameMatch ? routeNameMatch[2] : null;
@@ -96,6 +120,52 @@ const parseRouteLine = (line: string): ParsedRouteLine | null => {
 
     return null;
 };
+
+// Lightweight caches to avoid repeated work across provider calls.
+// We create small lookup maps keyed by method and by route name so that
+// the per-line matching work can consider a small candidate set instead
+// of iterating the entire routes list for each parsed line.
+let routesMetaCacheSig = "";
+let routesByMethod = new Map<string, any[]>();
+let routesByName = new Map<string, any[]>();
+
+const getRoutesMeta = () => {
+    const routes = getRoutes().items;
+    const sig = routes
+        .map((r) => `${r.method}|${r.uri}|${r.name || ""}|${r.filename || ""}`)
+        .join(";");
+
+    if (sig === routesMetaCacheSig) {
+        return { routesByMethod, routesByName };
+    }
+
+    routesMetaCacheSig = sig;
+    routesByMethod = new Map();
+    routesByName = new Map();
+
+    for (const r of routes) {
+        const methods = routeMethods(r.method);
+
+        for (const m of methods) {
+            const arr = routesByMethod.get(m) ?? [];
+            arr.push(r);
+            routesByMethod.set(m, arr);
+        }
+
+        if (r.name) {
+            const arr = routesByName.get(r.name) ?? [];
+            arr.push(r);
+            routesByName.set(r.name, arr);
+        }
+    }
+
+    return { routesByMethod, routesByName };
+};
+
+// Cache parsed route lines keyed by the exact line text. This avoids
+// repeating regex work when the provider is invoked frequently for the
+// same document contents.
+const parseCache = new Map<string, ParsedRouteLine | null>();
 
 const routeMethods = (method: string) =>
     method
@@ -204,24 +274,39 @@ export class RoutePathInlayHintsProvider implements vscode.InlayHintsProvider {
         const startLine = range.start.line;
         const endLine = range.end.line;
 
+        const { routesByMethod, routesByName } = getRoutesMeta();
+
         for (let line = startLine; line <= endLine; line++) {
             const textLine = document.lineAt(line);
-            const parsed = parseRouteLine(textLine.text);
+            let parsed = parseCache.get(textLine.text);
 
-            if (!parsed) {
-                continue;
+            if (parsed === undefined) {
+                parsed = parseRouteLine(textLine.text);
+                parseCache.set(textLine.text, parsed);
             }
+
+            if (!parsed) continue;
 
             let bestRoute: (typeof routes)[number] | null = null;
             let bestScore = Number.NEGATIVE_INFINITY;
 
-            for (const route of routes) {
-                const score = scoreRouteMatch(
-                    route,
-                    parsed,
-                    documentPath,
-                    line,
-                );
+            // Narrow candidates by name or method to avoid iterating all routes
+            const candidateSet = new Set<typeof routes[number]>();
+
+            if (parsed.name && routesByName.has(parsed.name)) {
+                for (const r of routesByName.get(parsed.name)!) candidateSet.add(r);
+            } else {
+                for (const m of parsed.methods) {
+                    const list = routesByMethod.get(m);
+
+                    if (list) for (const r of list) candidateSet.add(r);
+                }
+            }
+
+            const candidates = candidateSet.size > 0 ? Array.from(candidateSet) : routes;
+
+            for (const route of candidates) {
+                const score = scoreRouteMatch(route, parsed, documentPath, line);
 
                 if (score > bestScore) {
                     bestScore = score;
