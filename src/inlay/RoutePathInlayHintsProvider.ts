@@ -326,7 +326,7 @@ export class RoutePathInlayHintsProvider implements vscode.InlayHintsProvider {
             const hint = new vscode.InlayHint(position, [
                 {
                     value: ` ${path}`,
-                    tooltip: "Click to copy route path",
+                    tooltip: "Copy route path",
                     command: {
                         title: "Copy route path",
                         command: copyRoutePathCommand,
